@@ -15,6 +15,7 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.first_decode_step: bool = True
         self.prev_request_context_lengths: Dict[str, int] = {}
 
     @torch.inference_mode()
@@ -34,8 +35,9 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
-        (input_tokens, input_positions, seq_lens,
-         query_lens) = self.prepare_input_tensors(seq_group_metadata_list)
+        (input_tokens, input_positions, seq_lens, query_lens,
+         accepted_token_lengths
+         ) = self._prepare_input_tensors(seq_group_metadata_list)
 
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
@@ -46,6 +48,8 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         model_outputs = self.model_runner.model.generate_proposals(
             input_ids=input_tokens,
+            previous_hidden_states=execute_model_req.previous_hidden_states,
+            accepted_token_lengths=accepted_token_lengths,
             sample_len=sample_len,
             sampling_metadata=sampling_metadata)
 
@@ -53,10 +57,11 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
 
         return model_outputs, True
 
-    def prepare_input_tensors(
+    def _prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ):
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               Optional[torch.Tensor]]:
         if not seq_group_metadata_list:
             return ModelInput.empty(self.device)
 
@@ -109,9 +114,9 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
                 self.prev_request_context_lengths[
                     seq_group_metadata.request_id] = context_len
 
-        if not self.model_runner.model.first_decode_step:
-            self.model_runner.model.accepted_token_lengths = torch.tensor(
-                accepted_lengths_list, device=self.device, dtype=torch.long)
+        accepted_token_lengths = None if self.first_decode_step else \
+            torch.tensor(accepted_lengths_list,
+                         device=self.device, dtype=torch.long)
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
@@ -126,4 +131,4 @@ class MLPSpeculatorWorker(NonLLMProposerWorkerBase, MultiStepWorker):
                                          dtype=torch.long,
                                          device=self.device)
         return (input_tokens_tensor, input_positions_tensor, seq_lens_tensor,
-                query_lens_tensor)
+                query_lens_tensor, accepted_token_lengths)
