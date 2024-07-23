@@ -1,5 +1,5 @@
-from itertools import chain, count
-from typing import Iterator, List, Tuple
+from itertools import count
+from typing import Dict, Iterator, List, Tuple
 
 import torch
 
@@ -134,7 +134,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
 
-        num_scoring_tokens = len(target_seq_group_metadata_list)
+        num_scoring_tokens = sum(
+            len(sgm.seq_data) for sgm in target_seq_group_metadata_list)
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
@@ -204,20 +205,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         to the seq id in the original batch.
         """
 
-        if not seq_group_metadata_list:
-            return []
-
-        target_seq_group_metadata = list(
-            chain.from_iterable(
-                self._create_target_seq_group_metadata(
-                    seq_group_metadata,
-                    proposal_token_ids,
-                    i,
-                    target_seq_ids_iter,
-                ) for i, seq_group_metadata in enumerate(
-                    seq_group_metadata_list)))
-
-        return target_seq_group_metadata
+        return [] if not seq_group_metadata_list else [
+            self._create_target_seq_group_metadata(
+                seq_group_metadata,
+                proposal_token_ids,
+                i,
+                target_seq_ids_iter,
+            ) for i, seq_group_metadata in enumerate(seq_group_metadata_list)
+        ]
 
     def _create_target_seq_group_metadata(
         self,
@@ -225,16 +220,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
         batch_index: int,
         target_seq_ids_iter: Iterator[TargetSeqId],
-    ) -> List[SequenceGroupMetadata]:
+    ) -> SequenceGroupMetadata:
         """Given an input sequence group metadata and a list of draft tokens,
-        create a list of target SequenceGroupMetadata, one for each
+        create target SequenceGroupMetadata containing a sequence for each
         token id that needs to be scored.
 
         Naive speculative decoding requires K target model scores, one for each
         draft model token. However one can add a bonus token such that if each
         token is accepted, then a final token may be sampled from the model.
-        This function creates K+1 target SequenceGroupMetadata to take
-        advantage of the bonus token.
+        This function creates K+1 target Sequences to take advantage of the
+        bonus token.
         """
         assert not input_seq_group_metadata.is_prompt, (
             "Speculating on "
@@ -247,45 +242,21 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         token_ids_to_score = self._get_token_ids_to_score(
             proposal_token_ids[batch_index])
 
-        target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        for token_ids in token_ids_to_score:
-            target_seq_group_metadata_list.append(
-                self._create_single_target_seq_group_metadata(
-                    input_seq_group_metadata,
-                    input_seq_id,
-                    next(target_seq_ids_iter),
-                    token_ids,
-                ))
-
-        return target_seq_group_metadata_list
-
-    def _create_single_target_seq_group_metadata(
-        self,
-        seq_group_metadata: SequenceGroupMetadata,
-        seq_id: SeqId,
-        target_seq_id: TargetSeqId,
-        token_ids: List[TokenId],
-    ) -> SequenceGroupMetadata:
-        """Create a single target SequenceGroupMetadata.
-
-        Args:
-            seq_group_metadata: The metadata for the input sequence.
-            seq_id: The input sequence ID.
-            target_seq_id: The corresponding target sequence ID.
-            token_ids: The list of token ids that are to be appended to the
-                input sequence.
-        """
-        seq_data = seq_group_metadata.seq_data[seq_id]
+        seq_data = input_seq_group_metadata.seq_data[input_seq_id]
         prompt_token_ids = seq_data.get_prompt_token_ids()
-        new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+        block_table = input_seq_group_metadata.block_tables[input_seq_id]
 
-        new_seq_data_dict = {
-            target_seq_id:
-            SequenceData(
+        block_tables: Dict[TargetSeqId, List[int]] = {}
+        new_seq_data_dict: Dict[TargetSeqId, SequenceData] = {}
+        for token_ids in token_ids_to_score:
+            target_seq_id = next(target_seq_ids_iter)
+            block_tables[target_seq_id] = block_table
+            new_seq_data_dict[target_seq_id] = SequenceData(
                 prompt_token_ids=prompt_token_ids,
-                output_token_ids=new_output_token_ids,
-            ),
-        }
+                output_token_ids=[
+                    *seq_data.get_output_token_ids(), *token_ids
+                ],
+            )
         # This is a hack. Technically, spec decoding should compute
         # num_lookahead slots at one shot, but instead, it expands the batch
         # and evaluate one by one right now. context_len is seq_len - 1 because
@@ -293,23 +264,22 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
 
-        if (seq_group_metadata.state is not None
-                and seq_group_metadata.state.generator is not None):
+        if (input_seq_group_metadata.state is not None
+                and input_seq_group_metadata.state.generator is not None):
             generator = torch.Generator(
-                device=seq_group_metadata.state.generator.device)
-            generator.set_state(seq_group_metadata.state.generator.get_state())
+                device=input_seq_group_metadata.state.generator.device)
+            generator.set_state(
+                input_seq_group_metadata.state.generator.get_state())
             state = SequenceGroupState(generator=generator)
         else:
             state = None
 
         return SequenceGroupMetadata(
-            request_id=seq_group_metadata.request_id,
-            is_prompt=seq_group_metadata.is_prompt,
+            request_id=input_seq_group_metadata.request_id,
+            is_prompt=input_seq_group_metadata.is_prompt,
             seq_data=new_seq_data_dict,
-            sampling_params=seq_group_metadata.sampling_params,
-            block_tables={
-                target_seq_id: seq_group_metadata.block_tables[seq_id],
-            },
+            sampling_params=input_seq_group_metadata.sampling_params,
+            block_tables=block_tables,
             lora_request=None,
             token_chunk_size=1,
             state=state,
