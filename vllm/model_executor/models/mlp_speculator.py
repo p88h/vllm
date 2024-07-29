@@ -50,8 +50,8 @@ class MLPSpeculatorLayerNorm(nn.Module):
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         x = xf.type_as(x)
         if self.elementwise_scale_and_shift:
-            x = self.weight * x
-            x = x + self.bias
+            x.mul_(self.weight)
+            x.add_(self.bias)
         return x
 
 
@@ -131,6 +131,25 @@ class MLPSpeculator(nn.Module):
                                                 config.vocab_size, 1.0)
         self.sampler = Sampler()
 
+        self.execute_model = self
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        head_index: int,
+    ) -> torch.Tensor:
+        # Project and predict
+        z = self.emb[head_index](input_ids)  # b k d
+        states = self.proj[head_index](previous_hidden_states)
+
+        # Weighted add of state_weight*state and emb_weight*z
+        # Let subsequent LN take care of denominator
+        # state_weight is close to 1, so shouldn't be any precision issues
+        states.add_(z, alpha=self.emb_weight / self.state_weight)
+
+        return self.activation(self.ln[head_index](states))  # b k d
+
     def generate_proposals(
         self,
         input_ids: torch.Tensor,
@@ -155,17 +174,9 @@ class MLPSpeculator(nn.Module):
         next_tokens = []
 
         for head_index in range(num_predict_tokens):
+            states = self.execute_model(last_tokens, previous_hidden_states,
+                                        head_index)
 
-            # Project and predict
-            z = self.emb[head_index](last_tokens)  # b k d
-            states = self.proj[head_index](previous_hidden_states)
-
-            # Weighted add of state_weight*state and emb_weight*z
-            # Let subsequent LN take care of denominator
-            # state_weight is close to 1, so shouldn't be any precision issues
-            states.add_(z, alpha=self.emb_weight / self.state_weight)
-
-            states = self.activation(self.ln[head_index](states))  # b k d
             # TODO: not yet supporting top_k_tokens_per_head
             previous_hidden_states = states
 
