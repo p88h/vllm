@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import os
 import re
 from argparse import Namespace
 from contextlib import asynccontextmanager
@@ -12,7 +13,6 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
 from starlette.routing import Mount
 
 import vllm.envs as envs
@@ -106,6 +106,8 @@ async def build_async_engine_client(args) -> AsyncIterator[AsyncEngineClient]:
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
     else:
+        os.environ["PROMETHEUS_MULTIPROC_DIR"] = "/tmp/mytmpdir"
+
         # Select random path for IPC.
         rpc_path = get_open_zmq_ipc_path()
         logger.info("Multiprocessing frontend to use %s for RPC Path.",
@@ -148,8 +150,13 @@ router = APIRouter()
 
 
 def mount_metrics(app: FastAPI):
-    registry = CollectorRegistry()
-    multiprocess.MultiProcessCollector(registry)
+    from prometheus_client import make_asgi_app, multiprocess, CollectorRegistry
+
+    if "PROMETHEUS_MULTIPROC_DIR" in os.environ:
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+    else:
+        registry = None
     
     # Add prometheus asgi middleware to route /metrics requests
     metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
