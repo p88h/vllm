@@ -103,17 +103,19 @@ class AsyncStream:
     async def generator(
         self
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+        finished = False
         try:
             while True:
                 result = await self._queue.get()
                 if self._is_raisable(result):
+                    finished = True
                     if result == STOP_ITERATION:
                         return
                     raise result
                 yield result
-        except GeneratorExit:
-            self._cancel(self.request_id)
-            raise asyncio.CancelledError from None
+        finally:
+            if not finished:
+                self._cancel(self.request_id)
 
     @staticmethod
     def _is_raisable(value: Any):
