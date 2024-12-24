@@ -117,6 +117,11 @@ See [this page](#generative-models) for more information on how to use generativ
     - :code:`CohereForAI/c4ai-command-r-v01`, :code:`CohereForAI/c4ai-command-r7b-12-2024`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`CodeShellForCausalLM`
+    - CodeShell
+    - :code:`WisdomShell/CodeShell-7B-Chat`, :code:`WisdomShell/CodeShell-7B`, etc.
+    - 
+    - ✅︎
   * - :code:`DbrxForCausalLM`
     - DBRX
     - :code:`databricks/dbrx-base`, :code:`databricks/dbrx-instruct`, etc.

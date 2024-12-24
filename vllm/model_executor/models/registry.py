@@ -42,6 +42,7 @@ _TEXT_GENERATION_MODELS = {
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
+    "CodeShellForCausalLM": ("codeshell", "CodeShellForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "DeepseekForCausalLM": ("deepseek", "DeepseekForCausalLM"),
