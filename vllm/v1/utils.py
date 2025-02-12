@@ -13,6 +13,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils import get_mp_context, kill_process_tree
+from vllm.v1.list_utils import NumpyList
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -24,7 +25,7 @@ T = TypeVar("T")
 
 class ConstantList(Generic[T], Sequence):
 
-    def __init__(self, x: List[T]) -> None:
+    def __init__(self, x: Union[List[T], NumpyList[T]]) -> None:
         self._x = x
 
     def append(self, item):

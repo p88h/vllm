@@ -3,10 +3,13 @@
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
+import numpy as np
+
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
+from vllm.v1.list_utils import NumpyList
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -45,7 +48,7 @@ class Request:
         self.prompt_token_ids = prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
-        self._all_token_ids: List[int] = self.prompt_token_ids.copy()
+        self._all_token_ids = NumpyList(np.int32, prompt_token_ids)
         self.num_computed_tokens = 0
 
         # Multi-modal related
@@ -99,9 +102,11 @@ class Request:
         token_ids: Union[int, List[int]],
     ) -> None:
         if isinstance(token_ids, int):
-            token_ids = [token_ids]
-        self._output_token_ids.extend(token_ids)
-        self._all_token_ids.extend(token_ids)
+            self._output_token_ids.append(token_ids)
+            self._all_token_ids.append(token_ids)
+        else:
+            self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
 
     @property
     def num_tokens(self) -> int:
