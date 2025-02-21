@@ -238,6 +238,7 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
+    print("download_weights_from_hf", model_name_or_path, cache_dir, allow_patterns, revision, ignore_patterns)
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
         # Before we download we look at that is available:
@@ -256,6 +257,14 @@ def download_weights_from_hf(
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
+        print("snapshot download")
+        print(model_name_or_path)
+        print(allow_patterns)
+        print(ignore_patterns)
+        print(cache_dir)
+        print(revision)
+        print(local_only)
+        print()
         hf_folder = snapshot_download(
             model_name_or_path,
             allow_patterns=allow_patterns,
