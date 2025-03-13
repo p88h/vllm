@@ -301,8 +301,9 @@ class OutputProcessor:
 
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
-            stop_string = req_state.detokenizer.update(new_token_ids)
-            if stop_string and finish_reason != FinishReason.STOP:
+            stop_string = req_state.detokenizer.update(
+                new_token_ids, finish_reason == FinishReason.STOP)
+            if stop_string:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 

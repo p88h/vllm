@@ -88,7 +88,8 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update(self, new_token_ids: list[int]) -> Optional[str]:
+    def update(self, new_token_ids: list[int],
+               stop_terminated: bool) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -100,6 +101,14 @@ class IncrementalDetokenizer:
         if self.tokenizer is None:
             self.token_ids.extend(new_token_ids)
             return None
+
+        # If stop-terminated, exclude last token from detokenization
+        # based on include_stop_str_in_output parameter.
+        if stop_terminated and self.include_stop_str_in_output:
+            skipped_token_id = new_token_ids[-1]
+            new_token_ids = new_token_ids[:-1]
+        else:
+            skipped_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -127,7 +136,12 @@ class IncrementalDetokenizer:
 
         self.output_text += decoded_text
 
-        # 2) Evaluate stop criteria.
+        if stop_terminated:
+            if skipped_token_id is not None:
+                self.token_ids.append(skipped_token_id)
+            return None
+
+        # 2) Evaluate stop strings.
         stop_string = None
         if self.stop:
             stop = StopChecker.check_stop_strings(
