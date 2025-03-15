@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
+    from vllm.v1.engine import EngineCoreEvent, FinishReason
     from vllm.v1.output_processor import RequestState
 
 
@@ -93,26 +93,25 @@ class IterationStats:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
-    def update_from_output(self, output: "EngineCoreOutput",
+    def update_from_output(self, request_id: str, num_new_tokens: int,
+                           events: Optional[list["EngineCoreEvent"]],
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats]):
-        num_new_generation_tokens = len(output.new_token_ids)
-
-        self.num_generation_tokens += num_new_generation_tokens
+        self.num_generation_tokens += num_new_tokens
         if is_prefilling:
-            assert num_new_generation_tokens > 0
+            assert num_new_tokens > 0
             self.num_prompt_tokens += prompt_len
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
 
-        req_stats.num_generation_tokens += num_new_generation_tokens
+        req_stats.num_generation_tokens += num_new_tokens
 
         # Process request-level engine core events
-        if output.events is not None:
-            self.update_from_events(output.request_id, output.events,
-                                    is_prefilling, req_stats, lora_stats)
+        if events is not None:
+            self.update_from_events(request_id, events, is_prefilling,
+                                    req_stats, lora_stats)
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:

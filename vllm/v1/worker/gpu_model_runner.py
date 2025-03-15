@@ -1048,15 +1048,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = logprobs_tensors.tolists() \
-            if logprobs_tensors is not None else None
+        logprobs_tensors = None if sampler_output.logprobs_tensors is None \
+                else sampler_output.logprobs_tensors.cpu()  # TODO cpu sync tbd
 
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states,
-            scheduler_output,
-        )
+            hidden_states, scheduler_output)
 
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -1074,18 +1071,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for seq in sampled_token_ids[valid_mask].split(gen_lens)
             ]
 
-        if not self.use_spec_decode:
-            spec_token_ids = None
-        else:
-            spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids, sampling_metadata)
+        spec_token_ids = None if not self.use_spec_decode else (
+            self.generate_draft_token_ids(valid_sampled_token_ids,
+                                          sampling_metadata))
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=spec_token_ids,
-            logprobs=logprobs_lists,
+            logprobs=logprobs_tensors,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
 

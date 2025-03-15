@@ -7,6 +7,8 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
+import numpy as np
+
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
@@ -15,8 +17,7 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
-from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
-                            EngineCoreOutputs)
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -101,6 +102,14 @@ class Scheduler:
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
+
+        # preallocate numpy arrays
+        # todo - ensure they aren't reused too soon
+        max_spec_tokens = 4  # TODO
+        self.all_new_token_ids = np.empty(self.max_num_running_reqs
+                                          * max_spec_tokens,dtype=np.int32)
+        self.token_id_offsets = np.empty(self.max_num_running_reqs,
+                                         dtype=np.int16)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -529,6 +538,7 @@ class Scheduler:
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
+        #TODO also numpy array
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -536,7 +546,14 @@ class Scheduler:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
         new_running: list[Request] = []
-        outputs: list[EngineCoreOutput] = []
+
+        outputs = EngineCoreOutputs(
+            request_ids=[],
+            new_prompt_logprobs=prompt_logprobs_dict,
+        )
+
+        out_index: int = 0
+        out_total_tokens: int = 0
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -550,8 +567,10 @@ class Scheduler:
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[req_index]
-            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
+            new_token_ids = sampled_token_ids[req_index]
+            scheduled_spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id))
+            if scheduled_spec_token_ids is None:
                 # When the request's num_computed_tokens catches up
                 # its num_tokens, the request generates output tokens.
                 # Otherwise, we ignore the sampler output for the request.
@@ -565,13 +584,9 @@ class Scheduler:
                 # num_computed_tokens_step = num_scheduled_tokens -
                 #                            num_tokens_rejected,
                 # where num_tokens_rejected is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                scheduled_spec_token_ids = (
-                    scheduler_output.scheduled_spec_decode_tokens[req_id])
-
-                num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                    len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
+                # len(scheduled_spec_token_ids) + 1 - len(new_token_ids).
+                num_computed_tokens_step = num_tokens_scheduled - (
+                    len(scheduled_spec_token_ids) + 1 - len(new_token_ids))
                 request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (
@@ -593,25 +608,25 @@ class Scheduler:
 
             stopped = False
             new_logprobs = None
-            new_token_ids: list[int] = []
 
             if request.num_computed_tokens >= request.num_tokens:
-                for output_token_id in generated_token_ids:
-                    request.append_output_token_ids(output_token_id)
-                    new_token_ids.append(output_token_id)
-
+                for i, output_token_id in enumerate(new_token_ids):
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
                     stopped = self._check_stop(request)
                     if stopped:
                         self._free_request(request)
+                        del new_token_ids[i + 1:]
                         break
+
+                request.append_output_token_ids(new_token_ids)
 
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
                     assert logprobs is not None
                     # NOTE: once we support N tokens per step (spec decode),
                     # the outer lists can be of length > 1.
+
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
@@ -619,35 +634,40 @@ class Scheduler:
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    request.request_id,
-                    new_token_ids,
-                )
+                    req_id, new_token_ids)
 
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
-                # Add EngineCoreOutput for this Request.
-                outputs.append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
-                        new_logprobs=new_logprobs,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                outputs.request_ids.append(req_id)
+                if new_token_ids:
+                    num_new_tokens = len(new_token_ids)
+                    new_out_total_tokens = out_total_tokens + num_new_tokens
+                    self.all_new_token_ids[
+                        out_total_tokens:new_out_total_tokens] = new_token_ids
+                    self.token_id_offsets[out_index] = out_total_tokens
+                    out_total_tokens = new_out_total_tokens
+                    out_index += 1
+                    if new_logprobs:
+                        outputs.new_logprobs[req_id] = new_logprobs
+                if finish_reason := request.get_finished_reason():
+                    outputs.finish_reason[req_id] = (finish_reason,
+                                                     request.stop_reason)
+                if events := request.take_events():
+                    outputs.events[req_id] = events
             else:
-                assert not prompt_logprobs_tensors
+                assert req_id not in prompt_logprobs_dict
 
-            self.scheduled_req_ids.remove(request.request_id)
+            self.scheduled_req_ids.remove(req_id)
             if not stopped:
                 new_running.append(request)
 
+        # Trim numpy arrays.
+        outputs.token_id_offsets = None if out_total_tokens == out_index else (
+            self.token_id_offsets[:out_index])
+        outputs.new_token_ids = self.all_new_token_ids[:out_total_tokens]
+
         self.running = new_running
-        return EngineCoreOutputs(
-            outputs=outputs,
-            scheduler_stats=self.make_stats(),
-        )
+        outputs.scheduler_stats = self.make_stats()
+        return outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len

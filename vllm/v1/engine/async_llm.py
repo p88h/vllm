@@ -3,10 +3,8 @@
 import asyncio
 import logging
 import os
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Optional, Union
-
-import numpy as np
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
@@ -288,7 +286,7 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
-                num_outputs = len(outputs.outputs)
+                num_outputs = len(outputs.request_ids)
 
                 iteration_stats = IterationStats() if (
                     self.log_stats and num_outputs) else None
@@ -296,22 +294,40 @@ class AsyncLLM(EngineClient):
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = (outputs.outputs, )
+                chunk_size = VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
+                if num_outputs <= chunk_size:
+                    slices: Sequence[tuple[int, int]] = ((0, num_outputs), )
                 else:
-                    slices = np.array_split(
-                        outputs.outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+                    num_chunks = cdiv(num_outputs, chunk_size)
+                    rem = num_chunks % chunk_size
+                    slices_list = []
+                    start = 0
+                    for i in range(num_chunks):
+                        end = start + chunk_size
+                        if i < rem:
+                            end += 1
+                        slices_list.append((start, min(end, num_outputs)))
+                        start = end
+                    slices = slices_list
 
-                for i, outputs_slice in enumerate(slices):
+                    # end = 0
+                    # slices = [
+                    #     (start := end,
+                    #      end := min(num_outputs, start + chunk_size +
+                    #                 (1 if i < rem else 0)))
+                    #     for i in range(num_chunks)
+                    # ]
+
+                for start, end in slices:
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
+                        outputs, start, end, outputs.timestamp,
+                        iteration_stats)
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
 
                     # Allow other asyncio tasks to run between chunks
-                    if i + 1 < len(slices):
+                    if end < num_outputs:
                         await asyncio.sleep(0)
 
                     # 3) Abort any reqs that finished due to stop strings.

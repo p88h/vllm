@@ -5,13 +5,14 @@ import time
 from typing import Any, Optional, Union
 
 import msgspec
+import numpy as np
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -86,27 +87,6 @@ class EngineCoreEvent(msgspec.Struct):
         return cls(event_type, timestamp)
 
 
-class EngineCoreOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    request_id: str
-    new_token_ids: list[int]
-
-    new_logprobs: Optional[LogprobsLists] = None
-    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
-
-    finish_reason: Optional[FinishReason] = None
-    stop_reason: Union[int, str, None] = None
-    events: Optional[list[EngineCoreEvent]] = None
-
-    @property
-    def finished(self) -> bool:
-        return self.finish_reason is not None
-
-
 class UtilityOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -119,17 +99,56 @@ class UtilityOutput(
     result: Any = None
 
 
+# class EngineCoreOutput(
+#         msgspec.Struct,
+#         array_like=True,  # type: ignore[call-arg]
+#         omit_defaults=True,  # type: ignore[call-arg]
+#         gc=False):  # type: ignore[call-arg]
+#
+#     request_id: str
+#     new_token_ids: list[int]
+#
+#     new_logprobs: Optional[LogprobsLists] = None
+#     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+#
+#     finish_reason: Optional[FinishReason] = None
+#     stop_reason: Union[int, str, None] = None
+#     events: Optional[list[EngineCoreEvent]] = None
+#
+#     @property
+#     def finished(self) -> bool:
+#         return self.finish_reason is not None
+
+
 class EngineCoreOutputs(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    #NOTE(Nick): We could consider ways to make this more compact,
-    # e.g. columnwise layout
-
     # [num_reqs]
-    outputs: list[EngineCoreOutput] = []
+    #outputs: list[EngineCoreOutput] = []
+
+    request_ids: list[str] = []
+    new_token_ids: Optional[np.ndarray] = None  # TODO np typing?
+    # None => all counts are 1
+    token_id_offsets: Optional[np.ndarray] = None
+
+    # req_id -> LogprobsTensors
+    new_logprobs: dict[str,
+                       LogprobsTensors] = msgspec.field(default_factory=dict)
+
+    # req_id -> LogprobsTensors
+    new_prompt_logprobs: dict[str, LogprobsTensors] = msgspec.field(
+        default_factory=dict)
+
+    finish_reason: dict[str, tuple[FinishReason,
+                                   Union[int, str, None]]] = msgspec.field(
+                                       default_factory=dict)
+
+    events: dict[str, list[EngineCoreEvent]] = msgspec.field(
+        default_factory=dict)  # TODO TBD
+
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
 

@@ -9,7 +9,8 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
+from vllm.v1.engine import (EngineCoreEvent, EngineCoreOutputs,
+                            EngineCoreRequest, FinishReason)
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -237,7 +238,9 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        engine_core_outputs: list[EngineCoreOutput],
+        engine_core_outputs: EngineCoreOutputs,
+        start_index: int = 0,
+        end_index: Optional[int] = None,
         engine_core_timestamp: Optional[float] = None,
         iteration_stats: Optional[IterationStats] = None,
     ) -> OutputProcessorOutput:
@@ -264,36 +267,54 @@ class OutputProcessor:
         
         **********************************************************
         """
+        if end_index is None:
+            end_index = len(engine_core_outputs.request_ids)
+
+        all_new_token_ids = engine_core_outputs.new_token_ids
+        token_id_offsets = engine_core_outputs.token_id_offsets
+        assert all_new_token_ids is not None and token_id_offsets is not None
 
         request_outputs: list[RequestOutput] = []
         reqs_to_abort: list[str] = []
-        for engine_core_output in engine_core_outputs:
-            req_id = engine_core_output.request_id
+        for req_idx in range(start_index, end_index):
+            req_id = engine_core_outputs.request_ids[req_idx]
             req_state = self.request_states.get(req_id)
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
 
-            # 1) Compute stats for this iteration.
-            self._update_stats_from_output(req_state, engine_core_output,
-                                           engine_core_timestamp,
-                                           iteration_stats)
+            # TODO maybe keep new_token_ids as np array
+            if token_id_offsets is None:
+                new_token_ids = [all_new_token_ids[req_idx]]
+            else:
+                start, end = token_id_offsets[req_idx:req_idx + 2]
+                new_token_ids = all_new_token_ids[start:end].tolist()
 
-            new_token_ids = engine_core_output.new_token_ids
-            finish_reason = engine_core_output.finish_reason
-            stop_reason = engine_core_output.stop_reason
+            finish_reason, stop_reason = (
+                engine_core_outputs.finish_reason.get(req_id, (None, None)))
+            engine_finished = finish_reason is not None
+
+            # 1) Compute stats for this iteration.
+            if iteration_stats is not None:
+                self._update_stats_from_output(
+                    req_state, len(new_token_ids),
+                    engine_core_outputs.events.get(req_id),
+                    engine_core_timestamp, iteration_stats)
 
             req_state.is_prefilling = False
 
             # 2) Detokenize the token ids into text and perform stop checks.
             stop_string = req_state.detokenizer.update(
                 new_token_ids, finish_reason == FinishReason.STOP)
-            if stop_string and finish_reason != FinishReason.STOP:
+            if stop_string:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
 
             # 3) Compute sample and prompt logprobs for request, if required.
-            req_state.logprobs_processor.update_from_output(engine_core_output)
+            req_state.logprobs_processor.update_from_output(
+                engine_core_outputs.new_logprobs.get(req_id),
+                engine_core_outputs.new_prompt_logprobs.get(req_id),
+            )
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
@@ -312,7 +333,7 @@ class OutputProcessor:
                 parent_req = req_state.parent_req
                 if parent_req and not parent_req.child_requests:
                     self.parent_requests.pop(parent_req.request_id, None)
-                if not engine_core_output.finished:
+                if not engine_finished:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
@@ -329,7 +350,8 @@ class OutputProcessor:
         )
 
     def _update_stats_from_output(self, req_state: RequestState,
-                                  engine_core_output: EngineCoreOutput,
+                                  num_new_tokens: int,
+                                  events: Optional[list[EngineCoreEvent]],
                                   engine_core_timestamp: Optional[float],
                                   iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
@@ -339,7 +361,8 @@ class OutputProcessor:
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_output(engine_core_output,
+        iteration_stats.update_from_output(req_state.request_id,
+                                           num_new_tokens, events,
                                            engine_core_timestamp,
                                            req_state.is_prefilling,
                                            req_state.prompt_len,

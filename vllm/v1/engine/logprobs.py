@@ -9,8 +9,8 @@ from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_ids_list_to_tokens)
-from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.outputs import LogprobsTensors
 
 logger = init_logger(__name__)
 
@@ -49,7 +49,8 @@ class LogprobsProcessor:
             num_logprobs=num_logprobs,
         )
 
-    def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
+    def _update_sample_logprobs(self,
+                                logprobs_tensors: LogprobsTensors) -> None:
         """Update with sample logprobs from EngineCore.
 
         Outer lists are only of len > 1 if EngineCore made
@@ -64,11 +65,10 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
+        token_ids_lst, logprobs_lst, ranks_lst = logprobs_tensors.tolists()
 
         for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
                                              token_ids_lst):
-
             # Detokenize (non-incrementally).
             decoded_tokens = NONES if self.tokenizer is None else (
                 convert_ids_list_to_tokens(self.tokenizer, token_ids))
@@ -191,8 +191,12 @@ class LogprobsProcessor:
                 logprob_token_ids, logprobs, ranks, decoded_tokens)
         }
 
-    def update_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_logprobs is not None:
-            self._update_sample_logprobs(output.new_logprobs)
-        if output.new_prompt_logprobs_tensors is not None:
-            self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+    def update_from_output(
+        self,
+        new_logprobs: Optional[LogprobsTensors],
+        new_prompt_logprobs_tensors: Optional[LogprobsTensors],
+    ) -> None:
+        if new_logprobs is not None:
+            self._update_sample_logprobs(new_logprobs)
+        if new_prompt_logprobs_tensors is not None:
+            self._update_prompt_logprobs(new_prompt_logprobs_tensors)

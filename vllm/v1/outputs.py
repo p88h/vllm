@@ -32,6 +32,13 @@ class LogprobsTensors(NamedTuple):
     # [num_reqs]
     selected_token_ranks: torch.Tensor
 
+    def slice(self, start: int, end: int):
+        return LogprobsTensors(
+            self.logprob_token_ids[start:end],
+            self.logprobs[start:end],
+            self.selected_token_ranks[start:end],
+        )
+
     def tolists(self):
         return LogprobsLists(
             self.logprob_token_ids.tolist(),
@@ -73,7 +80,7 @@ class ModelRunnerOutput:
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
-    logprobs: Optional[LogprobsLists]
+    logprobs: Optional[LogprobsTensors]
 
     # req_id -> (token_ids, logprobs, ranks)
     # [prompt_len, num_prompt_logprobs]
