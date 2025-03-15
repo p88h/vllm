@@ -244,6 +244,7 @@ class Scheduler:
         # Record the LoRAs in scheduled_running_reqs
         requested_loras: set[int] = set()
         if self.lora_config:
+            # TODO avoid loop here
             requested_loras = set(
                 req.lora_request.lora_int_id for req in scheduled_running_reqs
                 if req.lora_request and req.lora_request.lora_int_id > 0)
@@ -251,7 +252,7 @@ class Scheduler:
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        waiting_for_fsm: deque[Request] = deque()
+        not_yet_ready: deque[Request] = deque()
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -266,26 +267,20 @@ class Scheduler:
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        waiting_structured_output_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(
-                            waiting_structured_output_req)
+                        self.waiting.popleft()
+                        not_yet_ready.appendleft(request)
                         continue
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
-                if self.lora_config and request.lora_request:
-                    req_lora_id = request.lora_request.lora_int_id
-                    if len(requested_loras) == self.lora_config.max_loras and (
-                            req_lora_id not in requested_loras):
-                        # Cannot schedule.
-                        # TODO (varun): This means all the other requests in
-                        # the WAITING queue will be blocked by this request,
-                        # even if,
-                        # 1. these other requests do not use LoRA, or,
-                        # 2. these other requests use the already requested
-                        # LoRAs.
-                        # This is too conservative and could be optimized.
-                        break
+                if self.lora_config and request.lora_request and (
+                        len(requested_loras) == self.lora_config.max_loras
+                        and request.lora_request.lora_int_id
+                        not in requested_loras):
+                    # Cannot schedule, skip.
+                    self.waiting.popleft()
+                    not_yet_ready.appendleft(request)
+                    continue
 
                 # Get already-cached tokens.
                 computed_blocks, num_computed_tokens = \
@@ -362,8 +357,8 @@ class Scheduler:
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
-        if waiting_for_fsm:
-            self.waiting.extendleft(waiting_for_fsm)
+        if not_yet_ready:
+            self.waiting.extendleft(not_yet_ready)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
@@ -591,16 +586,15 @@ class Scheduler:
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
-            # OPTIMIZATION: Avoid list(set) if the set is empty.
-            if cached_encoder_input_ids:
-                for input_id in list(cached_encoder_input_ids):
-                    start_pos = request.mm_positions[input_id]["offset"]
-                    num_tokens = request.mm_positions[input_id]["length"]
-                    if start_pos + num_tokens <= request.num_computed_tokens:
-                        # The encoder output is already processed and stored
-                        # in the decoder's KV cache.
-                        self.encoder_cache_manager.free_encoder_input(
-                            request, input_id)
+            for input_id in cached_encoder_input_ids:
+                mm_positions = request.mm_positions[input_id]
+                start_pos = mm_positions["offset"]
+                num_tokens = mm_positions["length"]
+                if start_pos + num_tokens <= request.num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    self.encoder_cache_manager.free_encoder_input(
+                        request, input_id)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
@@ -616,7 +610,7 @@ class Scheduler:
                     stopped = self._check_stop(request)
                     if stopped:
                         self._free_request(request)
-                        del new_token_ids[i + 1:]
+                        del new_token_ids[i + 1:]  # Trim if needed
                         break
 
                 request.append_output_token_ids(new_token_ids)

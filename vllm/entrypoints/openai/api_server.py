@@ -972,6 +972,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
+    # Avoid unnecessary async task context switching.
+    asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
