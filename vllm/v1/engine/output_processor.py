@@ -272,7 +272,7 @@ class OutputProcessor:
 
         all_new_token_ids = engine_core_outputs.new_token_ids
         token_id_offsets = engine_core_outputs.token_id_offsets
-        assert all_new_token_ids is not None and token_id_offsets is not None
+        assert all_new_token_ids is not None
 
         request_outputs: list[RequestOutput] = []
         reqs_to_abort: list[str] = []
