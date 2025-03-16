@@ -369,9 +369,7 @@ class EngineCoreProc(EngineCore):
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return EngineCoreOutputs(
-                outputs=[],
-                scheduler_stats=self.scheduler.make_stats(),
-            )
+                scheduler_stats=self.scheduler.make_stats())
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
 

@@ -605,6 +605,7 @@ class Scheduler:
 
             if request.num_computed_tokens >= request.num_tokens:
                 for i, output_token_id in enumerate(new_token_ids):
+                    request.append_output_token_id(output_token_id)
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
                     stopped = self._check_stop(request)
@@ -612,8 +613,6 @@ class Scheduler:
                         self._free_request(request)
                         del new_token_ids[i + 1:]  # Trim if needed
                         break
-
-                request.append_output_token_ids(new_token_ids)
 
                 # Extract sample logprobs if needed.
                 if request.sampling_params.logprobs is not None:
