@@ -261,20 +261,23 @@ def flashinfer_sample(
     if generators:
         for i, generator in generators.items():
             uniform_samples[:, i].uniform_(generator=generator)
+        deterministic = True
+    else:
+        deterministic = False
 
     if k is None:
         # Top-p only.
         next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-            probs, uniform_samples, p, deterministic=True)
+            probs, uniform_samples, p, deterministic=deterministic)
     elif p is None:
         # Top-k only.
         next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-            probs, uniform_samples, k, deterministic=True)
+            probs, uniform_samples, k, deterministic=deterministic)
     else:
         # Both top-k and top-p.
         next_token_ids, success = (
             flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+                probs, uniform_samples, k, p, deterministic=deterministic))
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
@@ -283,5 +286,5 @@ def flashinfer_sample(
         if p is not None:
             probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
         next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0], deterministic=True)
+            probs, uniform_samples[0], deterministic=deterministic)
     return next_token_ids.view(-1)
