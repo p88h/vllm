@@ -7,10 +7,13 @@ from types import FunctionType
 from typing import Any, Optional, Union
 
 import cloudpickle
+import msgspec
 import numpy as np
 import torch
 import zmq
 from msgspec import msgpack
+
+from vllm.multimodal import MultiModalKwargs, NestedTensors
 
 CUSTOM_TYPE_PICKLE = 1
 CUSTOM_TYPE_CLOUDPICKLE = 2
@@ -49,6 +52,9 @@ class MsgpackEncoder:
         # Fall back to pickle for object or void kind ndarrays.
         if isinstance(obj, np.ndarray) and obj.dtype.kind not in ('O', 'V'):
             return self._encode_ndarray(obj)
+
+        if isinstance(obj, MultiModalKwargs):
+            return {k: NestedTensorsStruct.new(nt) for k, nt in obj.items()}
 
         if isinstance(obj, FunctionType):
             return msgpack.Ext(CUSTOM_TYPE_CLOUDPICKLE, cloudpickle.dumps(obj))
@@ -93,6 +99,16 @@ class MsgpackDecoder:
                 return self._decode_ndarray(obj)
             if issubclass(t, torch.Tensor):
                 return torch.from_numpy(self._decode_ndarray(obj))
+
+        if t is MultiModalKwargs:
+            converted = msgspec.convert(obj,
+                                        dict[str, NestedTensorsStruct],
+                                        dec_hook=self.dec_hook)
+            return MultiModalKwargs({
+                k: nts.to_nested_tensors()
+                for k, nts in converted.items()
+            })
+
         return obj
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
@@ -109,3 +125,31 @@ class MsgpackDecoder:
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")
+
+
+class NestedTensorsStruct(msgspec.Struct):
+    tensors: list[torch.Tensor]
+    layout: Union[int, list]
+
+    @staticmethod
+    def new(nt: NestedTensors):
+        tensors: list[torch.Tensor] = []
+        return NestedTensorsStruct(tensors, _nt_to_layout(nt, tensors))
+
+    def to_nested_tensors(self):
+        return _layout_to_nt(self.layout, self.tensors)
+
+
+def _nt_to_layout(nt: NestedTensors,
+                  tensors: list[torch.Tensor]) -> Union[int, list]:
+    if isinstance(nt, torch.Tensor):
+        tensors.append(nt)
+        return len(tensors) - 1
+    assert isinstance(nt, (list, tuple))
+    return [_nt_to_layout(sub, tensors) for sub in nt]
+
+
+def _layout_to_nt(layout: Union[int, list],
+                  tensors: list[torch.Tensor]) -> NestedTensors:
+    return tensors[layout] if isinstance(layout, int) \
+        else [_layout_to_nt(sub, tensors) for sub in layout]
